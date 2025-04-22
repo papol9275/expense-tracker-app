@@ -254,6 +254,12 @@ def create_time_series(df):
     
     return fig
 
+def ensure_directory_exists(file_path):
+    """Ensure that the directory for a file path exists."""
+    directory = os.path.dirname(file_path)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+
 def load_budget():
     """Load budget data from CSV file or create a new one if it doesn't exist."""
     user_budget_file = get_user_data_path(BUDGET_FILE)
@@ -263,6 +269,8 @@ def load_budget():
         return budget_df
     else:
         budget_df = pd.DataFrame({'Category': CATEGORIES, 'Budget': np.zeros(len(CATEGORIES))})
+        # Ensure directory exists before saving
+        ensure_directory_exists(user_budget_file)
         budget_df.to_csv(user_budget_file, index=False)
         return budget_df
 
@@ -418,11 +426,7 @@ def display_dashboard(df):
     col1, col2, col3 = st.columns(3)
     col1.metric("Income", f"₱{income:,.2f}")
     col2.metric("Expenses", f"₱{expenses:,.2f}")
-    col3.metric(
-    "Balance",
-    f"₱{balance:,.2f}",
-    delta=f"{100*balance/income:,.2f}%" if income != 0 else None
-)
+    col3.metric("Balance", f"₱{balance:,.2f}", delta=f"{100*balance/income:,.2f}%")
     
     # Category breakdown
     st.subheader("Expense Breakdown")
