@@ -426,7 +426,11 @@ def display_dashboard(df):
     col1, col2, col3 = st.columns(3)
     col1.metric("Income", f"₱{income:,.2f}")
     col2.metric("Expenses", f"₱{expenses:,.2f}")
-    col3.metric("Balance", f"₱{balance:,.2f}", delta=f"{100*balance/income:,.2f}%")
+    col3.metric(
+    "Balance",
+    f"₱{balance:,.2f}",
+    delta=f"{100*balance/income:,.2f}%" if income != 0 else None
+)
     
     # Category breakdown
     st.subheader("Expense Breakdown")
