@@ -125,31 +125,42 @@ def add_transaction(date, category, transaction_type, amount, description=""):
     })
     df = pd.concat([df, new_transaction], ignore_index=True)
     save_data(df)
+    # Update data timestamp to trigger reloads across tabs
+    st.session_state['data_timestamp'] = datetime.now().timestamp()
     return df
 
 def get_date_range(period):
     """Return start and end dates based on period selection."""
     today = datetime.now()
-    if period == "This Week":
-        start_date = today - timedelta(days=today.weekday())
-        end_date = start_date + timedelta(days=6)  # Include full week
-    elif period == "This Month":
+    if period == "This Month":
+        # First day of current month
         start_date = today.replace(day=1)
-        # Get last day of current month
-        if today.month == 12:
-            end_date = today.replace(day=31)
-        else:
-            end_date = today.replace(month=today.month+1, day=1) - timedelta(days=1)
+        # Last day of current month - using calendar to get the correct last day
+        end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
     elif period == "Last Month":
-        last_month = today.replace(day=1) - timedelta(days=1)
-        start_date = last_month.replace(day=1)
-        end_date = last_month.replace(day=calendar.monthrange(last_month.year, last_month.month)[1])
+        # First day of last month
+        if today.month == 1:
+            # If January, go to December of previous year
+            last_month = today.replace(year=today.year-1, month=12, day=1)
+        else:
+            # Otherwise just go back one month
+            last_month = today.replace(month=today.month-1, day=1)
+        # Last day of last month
+        end_date = today.replace(day=1) - timedelta(days=1)
+        start_date = end_date.replace(day=1)
     elif period == "Last 3 Months":
-        start_date = (today - timedelta(days=90)).replace(day=1)
-        end_date = today
+        # Go back 3 months and set to first day of that month
+        if today.month > 3:
+            start_date = today.replace(month=today.month-3, day=1)
+        else:
+            # Handle year boundary
+            month_offset = today.month - 3 + 12  # Will be 10, 11 or 12
+            start_date = today.replace(year=today.year-1, month=month_offset, day=1)
+        # End date is last day of current month
+        end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
     elif period == "This Year":
         start_date = today.replace(month=1, day=1)
-        end_date = today.replace(month=12, day=31)  # Include full year
+        end_date = today.replace(month=12, day=31)
     else:  # All Time
         df = load_data()
         if df.empty:
@@ -157,7 +168,7 @@ def get_date_range(period):
             end_date = today
         else:
             start_date = df['Date'].min()
-            end_date = today
+            end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
     
     return start_date, end_date
 
@@ -316,11 +327,15 @@ def migrate_existing_data():
 
 # Main App Layout
 def main():
-    # Initialize session state variables for authentication
+    # Initialize session state variables for authentication and data tracking
     if 'authenticated' not in st.session_state:
         st.session_state['authenticated'] = False
     if 'show_migration' not in st.session_state:
         st.session_state['show_migration'] = False
+    if 'data_timestamp' not in st.session_state:
+        st.session_state['data_timestamp'] = datetime.now().timestamp()
+    if 'current_tab' not in st.session_state:
+        st.session_state['current_tab'] = 0
     
     # Check if user is authenticated
     if not st.session_state['authenticated']:
@@ -362,32 +377,35 @@ def main():
         # Show username in sidebar
         st.sidebar.write(f"Logged in as: **{st.session_state['username']}**")
         
-        # Sidebar navigation
-        st.sidebar.title("Navigation")
+        # Move navigation from sidebar to main area using tabs
+        st.title("Personal Finance Tracker")
         
-        # Creating clickable navigation options
-        page = st.sidebar.radio(
-            "Go to",
-            ["Dashboard", "Add Transaction", "View/Edit Transactions", "Reports", "Budget Management"],
-            label_visibility="collapsed"
-        )
+        # Creating tabbed navigation
+        dashboard_tab, add_transaction_tab, view_edit_tab, reports_tab, budget_tab = st.tabs([
+            "Dashboard", "Add Transaction", "View/Edit Transactions", "Reports", "Budget Management"
+        ])
         
-        if page == "Dashboard":
+        # Display content based on selected tab
+        with dashboard_tab:
             display_dashboard(df)
-        elif page == "Add Transaction":
+        
+        with add_transaction_tab:
             display_add_transaction()
-        elif page == "View/Edit Transactions":
+        
+        with view_edit_tab:
             display_view_edit(df)
-        elif page == "Reports":
+        
+        with reports_tab:
             display_reports(df)
-        elif page == "Budget Management":
+        
+        with budget_tab:
             display_budget_management()
 
 def display_dashboard(df):
     st.title("Finance Tracker Dashboard")
     
     # Time period filter
-    period = st.selectbox("Period", ["This Week", "This Month", "Last Month", "Last 3 Months", "This Year", "All Time"])
+    period = st.selectbox("Period", ["This Month", "Last Month", "Last 3 Months", "This Year", "All Time"])
     start_date, end_date = get_date_range(period)
     
     # Filter data
@@ -400,13 +418,13 @@ def display_dashboard(df):
     col1, col2, col3 = st.columns(3)
     col1.metric("Income", f"₱{income:,.2f}")
     col2.metric("Expenses", f"₱{expenses:,.2f}")
-    col3.metric("Balance", f"₱{balance:,.2f}", delta=f"{balance:,.2f}")
+    col3.metric("Balance", f"₱{balance:,.2f}", delta=f"{100*balance/income:,.2f}%")
     
     # Category breakdown
     st.subheader("Expense Breakdown")
     category_chart = create_category_chart(filtered_df)
     if category_chart:
-        st.plotly_chart(category_chart, use_container_width=True)
+        st.plotly_chart(category_chart, use_container_width=True, key="dashboard_category_chart")
     else:
         st.info("No expense data available for the selected period.")
     
@@ -428,12 +446,18 @@ def display_dashboard(df):
     # Quick add expense
     st.subheader("Quick Add Expense")
     with st.expander("Add a new expense quickly"):
-        with st.form("quick_expense_form"):
+        # Initialize session state for form fields if not exists
+        if 'quick_expense_amount' not in st.session_state:
+            st.session_state['quick_expense_amount'] = 0.01
+        if 'quick_expense_description' not in st.session_state:
+            st.session_state['quick_expense_description'] = ""
+            
+        with st.form("quick_expense_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
             quick_date = col1.date_input("Date", value=datetime.now(), max_value=datetime(2050, 12, 31))
             quick_category = col2.selectbox("Category", CATEGORIES)
-            quick_amount = col1.number_input("Amount (₱)", min_value=0.01, step=0.01)
-            quick_description = col2.text_input("Description (optional)")
+            quick_amount = col1.number_input("Amount (₱)", min_value=0.01, step=0.01, value=st.session_state['quick_expense_amount'])
+            quick_description = col2.text_input("Description (optional)", value=st.session_state['quick_expense_description'])
             
             quick_submit = st.form_submit_button("Add Expense")
             
@@ -443,7 +467,9 @@ def display_dashboard(df):
                 else:
                     add_transaction(quick_date, quick_category, "Expense", quick_amount, quick_description)
                     st.success("Expense added successfully!")
-                    st.rerun()
+                    # Reset the session state for next use
+                    st.session_state['quick_expense_amount'] = 0.01
+                    st.session_state['quick_expense_description'] = ""
 
 def display_add_transaction():
     st.title("Add Transaction")
@@ -627,67 +653,130 @@ def display_view_edit(df):
                     st.success("Transactions updated successfully!")
                     st.rerun()
         
-        # Add buttons for delete functionality
+        # Improved transaction deletion interface
         st.subheader("Delete Transactions")
         
-        # Create a selectbox for easier transaction selection
+        # Add some spacing
+        st.write("")
+        
+        # Show a table with delete buttons for each transaction
         st.write("Select a transaction to delete:")
-        transaction_options = [f"{row['Date'].strftime('%Y-%m-%d')} | {row['Category']} | {row['Type']} | ₱{row['Amount']:,.2f} | {str(row['Description'])[:30]}" 
-                            for idx, row in display_df.iterrows()]
         
-        selected_idx = st.selectbox(
-            "Select transaction:",
-            range(len(transaction_options)),
-            format_func=lambda i: transaction_options[i],
-            label_visibility="collapsed"
-        )
-        
-        # Create columns for delete button and transaction details
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            delete_pressed = st.button("Delete Transaction", type="primary", use_container_width=True)
-        with col2:
-            if selected_idx is not None:
-                selected_row = display_df.iloc[selected_idx]
-                st.info(f"Selected: {selected_row['Date'].strftime('%Y-%m-%d')} - {selected_row['Category']} ({selected_row['Type']}) - ₱{selected_row['Amount']:,.2f}")
+        # Create a container for the deletion table
+        with st.container():
+            # Create header row
+            header_cols = st.columns([0.15, 0.2, 0.15, 0.15, 0.25, 0.1])
+            header_cols[0].markdown("**Date**")
+            header_cols[1].markdown("**Category**")
+            header_cols[2].markdown("**Type**")
+            header_cols[3].markdown("**Amount**")
+            header_cols[4].markdown("**Description**")
+            header_cols[5].markdown("**Action**")
+            
+            # Add a separator line
+            st.markdown("<hr style='margin: 0; padding: 0;'>", unsafe_allow_html=True)
+            
+            # Show up to 10 transactions at a time
+            display_count = min(10, len(display_df))
+            
+            # Show transaction rows with delete buttons
+            for i in range(display_count):
+                row = display_df.iloc[i]
+                cols = st.columns([0.15, 0.2, 0.15, 0.15, 0.25, 0.1])
+                
+                cols[0].write(row['Date'].strftime('%Y-%m-%d'))
+                cols[1].write(row['Category'])
+                cols[2].write(row['Type'])
+                cols[3].write(f"₱{row['Amount']:,.2f}")
+                
+                # Truncate long descriptions
+                desc = str(row['Description'])
+                if len(desc) > 20:
+                    desc = desc[:20] + "..."
+                cols[4].write(desc)
+                
+                # Delete button for this transaction
+                delete_btn = cols[5].button("🗑️", key=f"delete_{i}")
+                if delete_btn:
+                    st.session_state.confirm_delete = True
+                    st.session_state.transaction_to_delete = i
         
         # Handle delete confirmation
-        if delete_pressed:
-            st.session_state.confirm_delete = True
-            st.session_state.transaction_to_delete = selected_idx
-            
         if st.session_state.confirm_delete:
-            st.warning("Are you sure you want to delete this transaction? This action cannot be undone.")
+            # Get the transaction to delete
+            transaction_to_delete = display_df.iloc[st.session_state.transaction_to_delete]
+            
+            # Create a confirmation dialog
+            st.warning(f"Are you sure you want to delete this transaction?\n\n"
+                      f"**Date**: {transaction_to_delete['Date'].strftime('%Y-%m-%d')}\n"
+                      f"**Category**: {transaction_to_delete['Category']}\n"
+                      f"**Type**: {transaction_to_delete['Type']}\n"
+                      f"**Amount**: ₱{transaction_to_delete['Amount']:,.2f}\n"
+                      f"**Description**: {str(transaction_to_delete['Description'])}")
             
             col1, col2 = st.columns(2)
             with col1:
-                if st.button("Yes, Delete"):
-                    # Get the transaction from the displayed dataframe
-                    transaction_to_delete = display_df.iloc[st.session_state.transaction_to_delete]
+                if st.button("Yes, Delete", type="primary"):
+                    # Get fresh data to ensure we're working with the latest version
+                    updated_df = load_data()
                     
-                    # Find the matching row in the original dataframe
-                    match_idx = df.index[
-                        (df['Date'] == transaction_to_delete['Date']) &
-                        (df['Category'] == transaction_to_delete['Category']) &
-                        (df['Type'] == transaction_to_delete['Type']) &
-                        (df['Amount'] == transaction_to_delete['Amount']) &
-                        (df['Description'] == transaction_to_delete['Description'])
-                    ].tolist()
+                    # Handle date comparison properly - convert string dates if needed
+                    if isinstance(transaction_to_delete['Date'], str):
+                        delete_date = pd.to_datetime(transaction_to_delete['Date'])
+                    else:
+                        delete_date = transaction_to_delete['Date']
+                        
+                    # Round amount to avoid floating point precision issues
+                    delete_amount = round(float(transaction_to_delete['Amount']), 2)
                     
-                    if match_idx:
+                    # Convert description to string to handle NaN values properly
+                    delete_description = str(transaction_to_delete['Description'])
+                    if delete_description == 'nan':
+                        delete_description = ''
+                    
+                    # Find the matching row using a more robust approach
+                    match_found = False
+                    match_idx = None
+                    
+                    # Look for the transaction with a tolerance for floating point differences
+                    for idx, row in updated_df.iterrows():
+                        date_match = pd.to_datetime(row['Date']).date() == delete_date.date()
+                        category_match = row['Category'] == transaction_to_delete['Category'] 
+                        type_match = row['Type'] == transaction_to_delete['Type']
+                        amount_match = abs(float(row['Amount']) - delete_amount) < 0.01  # Allow tiny difference
+                        
+                        # Handle description - it could be NaN or different string representation
+                        row_desc = str(row['Description'])
+                        if row_desc == 'nan':
+                            row_desc = ''
+                        desc_match = row_desc == delete_description
+                        
+                        if date_match and category_match and type_match and amount_match and desc_match:
+                            match_found = True
+                            match_idx = idx
+                            break
+                    
+                    if match_found:
                         # Delete the transaction from the original dataframe
-                        df = df.drop(match_idx[0]).reset_index(drop=True)
+                        updated_df = updated_df.drop(match_idx).reset_index(drop=True)
                         
                         # Save the updated dataframe
-                        save_data(df)
+                        save_data(updated_df)
+                        
+                        # Update data timestamp to trigger reloads across tabs
+                        st.session_state['data_timestamp'] = datetime.now().timestamp()
+                        
+                        # Successfully deleted
                         st.success("Transaction deleted successfully!")
                         
                         # Reset the state
                         st.session_state.confirm_delete = False
                         st.session_state.transaction_to_delete = None
+                        
+                        # Reload the page to refresh all data
                         st.rerun()
                     else:
-                        st.error("Transaction could not be found in the database.")
+                        st.error("Transaction could not be found in the database. This may happen if the data was modified elsewhere.")
             
             with col2:
                 if st.button("Cancel"):
@@ -716,13 +805,13 @@ def display_reports(df):
     st.subheader("Income vs Expenses")
     income_expense_chart = create_time_series(filtered_df)
     if income_expense_chart:
-        st.plotly_chart(income_expense_chart, use_container_width=True)
+        st.plotly_chart(income_expense_chart, use_container_width=True, key="reports_income_expense_chart")
     
     # Category breakdown for the period
     st.subheader("Expense Categories")
     category_chart = create_category_chart(filtered_df)
     if category_chart:
-        st.plotly_chart(category_chart, use_container_width=True)
+        st.plotly_chart(category_chart, use_container_width=True, key="reports_category_chart")
     
     # Budget comparison
     st.subheader("Budget Comparison")
@@ -757,7 +846,7 @@ def display_reports(df):
             labels={'Amount': 'Total Expenses (₱)', 'DayOfWeek': 'Day of Week'},
             color='DayOfWeek'
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="day_of_week_chart")
 
 def display_budget_management():
     st.title("Budget Management")
